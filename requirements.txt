@@ -1,0 +1,12 @@
+langchain
+langchain-community
+python-dotenv
+langchain-chroma
+langchain_huggingface
+sentence-transformers
+langchain-groq
+numpy
+rank_bm25
+fastapi[standard]
+requests
+huggingface_hub
