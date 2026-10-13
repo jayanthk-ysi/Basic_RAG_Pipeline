@@ -24,6 +24,7 @@ from config import PROJECT_META, CLIENT_HINTS, DEV_ONLY, DOCS_DIR,CHROMA_PATH, C
 
 
 load_dotenv() # loads GROQ_API_KEY from .env, must run before the ChatGroq clients are created below
+import ragevalkit
 torch.set_num_threads(os.cpu_count() or 4) # torch defaulted to 4 threads here; using all cores cut rerank time by about a third
 
 embeddings = HuggingFaceEmbeddings(model_name=ensure_model(EMBEDDING_MODEL))
@@ -158,7 +159,7 @@ def get_bm25(specifications): # these are metadata filters
 get_bm25({})
 get_bm25({"audience": CLIENT_AUDIENCES})
 
-
+@ragevalkit.step("analysis")
 def analyse(question, history):
     input_prompt = ANALYSIS_PROMPT.format(projects = PROJECT_LIST, history = history or "None", question = question, max_sub = MAX_SUBQUERIES)
     result, stats = llm_call(analysis_llm, input_prompt)
@@ -261,7 +262,7 @@ def search_candidates(query, spec):
 
     return fused, {"chroma": t_chroma, "bm25": t_bm25, "rrf": t_rrf}
 
-
+@ragevalkit.step("rerank")
 def rerank(query, docs):
     if not docs:
         return []
@@ -403,6 +404,11 @@ def handle(session_id, question):
                 "stats": {"analysis": empty, "branches": [], "total_s": 0.0, "tokens": {"llm_calls": 0, "input": 0, "output": 0, "total": 0}}}
 
     analysis, analysis_stats = analyse(question, history_text)
+
+    ragevalkit.note("kind", analysis.kind)
+    ragevalkit.note("technical", str(analysis.technical))
+    ragevalkit.note("sub_queries", str(len(analysis.sub_queries)))
+
     stats = {"analysis": analysis_stats, "branches": []}
 
     debug = {"kind": analysis.kind, "relation": analysis.relation, "technical": analysis.technical, "sub_queries": analysis.sub_queries}
@@ -412,18 +418,27 @@ def handle(session_id, question):
     elif analysis.kind == "off_topic":
         answer = OFF_TOPIC
     elif analysis.kind == "overview": # broad question: no sub-queries, no filter call, no search; answered from the overview
-        answer, stats["generation"] = generate(question, history_text, [], analysis.technical, overview_only=True)
+        with ragevalkit.step("generation"):
+            answer, stats["generation"] = generate(question, history_text, [], analysis.technical, overview_only=True)
         if answer is None:
             answer, failed = UNAVAILABLE, True
     else:
-        t = time.time()
-        with ThreadPoolExecutor(max_workers=len(analysis.sub_queries)) as pool:
-            branches = list(pool.map(lambda q: run_branch(q, analysis.technical), analysis.sub_queries))
-        stats["retrieval_wall_s"] = round(time.time() - t, 2) # sub-queries run in parallel, so this is not the sum
+        with ragevalkit.step("retrieval") as ret_step:
+            t = time.time()
+            with ThreadPoolExecutor(max_workers=len(analysis.sub_queries)) as pool:
+                branches = list(pool.map(lambda q: run_branch(q, analysis.technical), analysis.sub_queries))
+            stats["retrieval_wall_s"] = round(time.time() - t, 2) # sub-queries run in parallel, so this is not the sum
 
-        t = time.time()
-        groups = combine(branches)
-        stats["combine_s"] = round(time.time() - t, 4)
+            t = time.time()
+            groups = combine(branches)
+            stats["combine_s"] = round(time.time() - t, 4)
+
+            ret_step.material = format_context(groups)
+            ret_step.sources = list({
+                doc.metadata["project"]
+                for g in groups
+                for doc, _ in g["chunks"]
+            })
 
         debug["branches"] = [{
             "query": b["query"], "filters": b["spec"], "relaxed": b["relaxed"],
@@ -438,7 +453,8 @@ def handle(session_id, question):
         understood = " | ".join(analysis.sub_queries)
         asked = question if understood.strip().lower() == question.strip().lower() else f"{question}\n(Understood as: {understood})"
 
-        answer, stats["generation"] = generate(asked, history_text, groups, analysis.technical)
+        with ragevalkit.step("generation"):
+            answer, stats["generation"] = generate(asked, history_text, groups, analysis.technical)
         if answer is None:
             answer, failed = UNAVAILABLE, True
 
