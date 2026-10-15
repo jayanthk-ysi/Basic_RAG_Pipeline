@@ -10,4 +10,4 @@ rank_bm25
 fastapi[standard]
 requests
 huggingface_hub
-git+https://github.com/devanshmakam-youngsoft/ragevalkit.git@v0.1.0
+git+https://github.com/devanshmakam-youngsoft/ragevalkit.git

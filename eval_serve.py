@@ -15,6 +15,7 @@ ragevalkit.serve(
     session_id_fn=lambda chat_id: f"eval-{chat_id}",
     require_login=True,
     record_mode="eval",
+    conversational_types=["overview"],
     record_detail="selected",
     answer_weight=0.6,
     material_weight=0.4,
